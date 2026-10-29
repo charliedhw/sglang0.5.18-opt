@@ -1,0 +1,38 @@
+--- a/sglang/srt/layers/logits_processor.py
++++ b/sglang/srt/layers/logits_processor.py
+@@ -69,6 +69,13 @@
+ _is_cpu = is_cpu()
+ 
+ _RELAYOUT_LM_HEAD = os.environ.get("SGLANG_HCU_LM_HEAD_NN", "1") == "1"
++# SGLANG_HCU_SKINNY_LM_HEAD=1: decode-sized bf16 lm_head GEMMs on the relaid NN weight run
++# hcu_ops' skinny NN GEMM (~1.11-1.33 vs 1.58-1.59 ms for GLM-5.3's 154880-row head at
++# M <= 64 on BW1100); it returns None (-> torch.matmul) for M > 64, untuned shapes or the NT
++# layout.
++_hcu_lm_head = None
++if os.environ.get("SGLANG_HCU_SKINNY_LM_HEAD", "0") == "1":
++    import hcu_ops as _hcu_lm_head
+ 
+ 
+ def _maybe_relayout_lm_head_weight(lm_head) -> None:
+@@ -926,9 +933,18 @@
+                 )
+             else:
+                 _maybe_relayout_lm_head_weight(lm_head)
+-                logits = torch.matmul(
+-                    hidden_states.to(lm_head.weight.dtype), lm_head.weight.T
+-                )
++                logits = None
++                if (
++                    _hcu_lm_head is not None
++                    and hidden_states.dtype == lm_head.weight.dtype
++                ):
++                    logits = _hcu_lm_head.try_skinny_nn_bf16(
++                        hidden_states, lm_head.weight.T
++                    )
++                if logits is None:
++                    logits = torch.matmul(
++                        hidden_states.to(lm_head.weight.dtype), lm_head.weight.T
++                    )
+         else:
+             # GGUF models
+             # TODO: use weight_packed_linear for GGUF models

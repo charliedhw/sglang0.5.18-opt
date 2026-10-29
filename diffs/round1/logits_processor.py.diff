@@ -1,0 +1,51 @@
+--- a/sglang/srt/layers/logits_processor.py
++++ b/sglang/srt/layers/logits_processor.py
+@@ -15,6 +15,7 @@
+ 
+ import dataclasses
+ import logging
++import os
+ from contextlib import contextmanager
+ from typing import Any, Dict, List, Optional, Tuple, Union
+ 
+@@ -67,6 +68,32 @@
+ _is_npu = is_npu()
+ _is_cpu = is_cpu()
+ 
++_RELAYOUT_LM_HEAD = os.environ.get("SGLANG_HCU_LM_HEAD_NN", "1") == "1"
++
++
++def _maybe_relayout_lm_head_weight(lm_head) -> None:
++    """Store the LM-head weight as a [K, V]-contiguous buffer viewed as [V, K].
++
++    rocBLAS picks very slow kernels for the NT layout of the huge
++    bf16 LM-head GEMM on HCU; with this layout ``weight.T`` is contiguous and
++    the GEMM runs as NN. Done once, outside of CUDA graph capture.
++    """
++    global _RELAYOUT_LM_HEAD
++    if not _RELAYOUT_LM_HEAD:
++        return
++    w = lm_head.weight
++    if w.dim() != 2 or not w.is_cuda or not w.is_contiguous() or w.shape[0] == 1:
++        return
++    if torch.cuda.is_current_stream_capturing():
++        # A captured graph may now reference the current storage; never move it.
++        _RELAYOUT_LM_HEAD = False
++        logger.warning("LM-head relayout skipped: first call was under graph capture.")
++        return
++    w.data = w.data.t().contiguous().t()
++    logger.info("LM-head weight relaid out for NN GEMM: shape=%s", tuple(w.shape))
++    torch.cuda.empty_cache()
++
++
+ _UNQUANTIZED_LM_HEAD_METHODS = {
+     "UnquantizedEmbeddingMethod",
+     "UnquantizedLinearMethod",
+@@ -898,6 +925,7 @@
+                     hidden_states.bfloat16(), lm_head.weight.T.bfloat16()
+                 )
+             else:
++                _maybe_relayout_lm_head_weight(lm_head)
+                 logits = torch.matmul(
+                     hidden_states.to(lm_head.weight.dtype), lm_head.weight.T
+                 )

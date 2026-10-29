@@ -1,0 +1,17 @@
+layers/logits_processor.py
+layers/quantization/unquant.py
+layers/attention/dsa/dsa_indexer_metadata.py
+layers/quantization/fp8_utils.py
+layers/linear.py
+layers/rotary_embedding/base.py
+layers/moe/topk.py
+layers/moe/ep_moe/layer.py
+models/deepseek_common/attention_forward_methods/forward_mla.py
+models/deepseek_common/attention_forward_methods/forward_mla_rocm.py
+layers/sampler.py
+layers/attention/dsa_backend.py
+layers/layernorm.py
+layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_fp8.py
+models/deepseek_v2.py
+layers/attention/dsa/dsa_indexer.py
+speculative/draft_lm_head_vp.py
