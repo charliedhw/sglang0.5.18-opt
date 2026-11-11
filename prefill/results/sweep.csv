@@ -1,0 +1,9 @@
+arm,env,pct,new_tok_s,all_tok_s,ttft_ms,hit_pct,ok,secs
+base,"",0,10925,10925,76270,0.0,32,230
+base,"",90,7285,72430,14023,89.9,32,78
+pf_q8,"PREFILL_BE=flashmla_sparse_q8",0,FAIL,FAIL,FAIL,FAIL,0,40
+pf_q8,"PREFILL_BE=flashmla_sparse_q8",90,FAIL,FAIL,FAIL,FAIL,0,38
+pf_kv,"PREFILL_BE=flashmla_kv",0,7857,7857,106089,0.0,32,307
+pf_kv,"PREFILL_BE=flashmla_kv",90,6150,61140,16725,89.9,32,86
+pf_auto,"PREFILL_BE=flashmla_auto",0,10924,10924,76276,0.0,32,229
+pf_auto,"PREFILL_BE=flashmla_auto",90,7263,72209,14134,89.9,32,75

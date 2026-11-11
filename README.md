@@ -7,7 +7,7 @@
 - 单机和 PD 分离两种部署的启动脚本；
 - 测试与分析工具。
 
-工作时间 2026-10-21 ~ 10-26，在 dcu4 / dcu5 两台 8 卡节点上完成。优化镜像 `glm5.3_v1023` 已包含本仓库的全部补丁。
+工作时间 2026-10-21 ~ 11-11，在 dcu4 / dcu5 两台 8 卡节点上完成。优化镜像 `glm5.3_v1023` 已包含 10 月那批补丁；11 月的 prefill 补丁需另行安装（见 `prefill/`）。
 
 | 阶段 | 日期 | 内容 | 详细文档 |
 |---|---|---|---|
@@ -15,6 +15,7 @@
 | 第二轮 | 10-22 ~ 10-23 | 新建 `hcu_ops` 算子包，13 个 sglang 补丁，分批次 1、A、B 三批 | `docs/GLM5.3_opt2_README_20261023.md` |
 | 合并报告 | 10-23 | 第一轮 + 第二轮完整报告：开关表、A/B 数据、精度 | `docs/GLM5.3_DCU_优化报告_20261023.md` |
 | PD 分离 | 10-25 ~ 10-26 | P（CP8）和 D（DP8）启动脚本；P 侧改 64K chunk 并加静态 EPLB | `docs/GLM5.3_PD分离测试与优化报告_20261026.md` |
+| **prefill 优化** | **11-10 ~ 11-11** | **paged K-cache dequant kernel 重写（12.3×）+ lightop fp8 indexer 开关；定位并修复"缓存命中反而变慢"** | **`prefill/README.md`、`docs/GLM5.3_prefill优化报告_20261111.md`** |
 
 ## 1. 目录结构
 
@@ -25,6 +26,7 @@
 | `hcu_ops/` | 新增算子包<br>源码：`csrc/*.cu`、`bind.cpp`、`setup.py`、`build_inc.sh`<br>Python 包：`hcu_ops/__init__.py`、`skinny_cfg.json`。不含预编译 `_C.so`，需在 gfx938 + DTK 环境下编译<br>`tests/`：逐 bit 单测与计时；`tune/`：skinny GEMM / bmm 调优脚本 |
 | `start/` | 单机 DP8 启动脚本 `sglang_start_glm53_opt.sh`，DeepEP normal 配置 `deepep_cfg40.json` |
 | `pd/` | PD 分离：`p_opt.sh`（prefill，CP8）、`d_opt.sh`（decode，DP8/TP8）<br>`eplb/rand_c64k.pt`：静态 EPLB 专家分布<br>`work/`：重启、TTFT 探针、长上下文 bench、对比、微基准脚本 |
+| `prefill/` | **11 月 prefill 优化**：dequant kernel 补丁与 diff、微基准、A/B 与扫描脚本、全部实测 CSV、更新后的 `p_opt.sh`。详见 `prefill/README.md` |
 | `tools/` | profiling 分析（`kagg.py`、`tracediff.py`、`kseq.py`、`kstat.py`）、A/B（`ab_bench.sh`、`ab_env.sh`）、排除 prefill 的步时统计（`ana_clean.py`）、greedy 一致性检查（`greedy_chk.py`）等 |
 | `eval/` | gsm8k 评测：`drive_gsm8k.sh` 在宿主机运行，`run_gsm8k.sh` 在 evalscope 容器内运行 |
 | `skill/dcu-model-opt/` | DCU 模型优化 skill：流程、工具、踩坑清单、GLM5.3 案例 |
@@ -99,7 +101,7 @@ PD 分离阶段只修改了启动参数，没有新增代码补丁。
 
 ## 3. 效果
 
-### 3.1 单机 DP8
+### 3.1 单机 DP8（10 月）
 
 | 项目 | 结果 |
 |---|---|
@@ -108,7 +110,32 @@ PD 分离阶段只修改了启动参数，没有新增代码补丁。
 | 第二轮（算子），-1015 权重，64K PC90% decode 步时 | c1 81.6 → 62.7 ms（**−23.2%**），c8 −19.5%，c16 −13.6%，c32 −11.1%<br>c1 输出吞吐 59.7 → 74.9 tok/s（+25.5%） |
 | 精度 | -1015 + 最终脚本：gsm8k 97.27%（1319 题），与优化前的差异在统计误差内 |
 
-### 3.2 PD 分离（1P dcu4 + 1D dcu5）
+### 3.2 PD 分离 prefill 优化（11-10 ~ 11-11，详见 `prefill/README.md`）
+
+| 场景 | 指标 | 优化前 → 后 | 变化 |
+|---|---|---|---|
+| **90% 前缀缓存命中** | 新 token 吞吐 | 7206 → **9833** tok/s | **+36.5%** |
+| | TTFT | 14241 → **10361** ms | **−27.2%** |
+| **无缓存**（40K/64K × c16/32/64，6 点平均） | TTFT | — | **−8%** |
+| | 吞吐 | — | **+8.4%** |
+
+两项改动：
+
+1. **`SGLANG_DSA_FAST_DEQUANT_PAGED`** —— paged K-cache dequant 的 Triton kernel 原本以
+   `grid = (num_tokens, 5)` 启动，每 program 只搬 128 字节，实测 97 GB/s（本机 copy 上限 1361 GB/s）。
+   按同一源文件里已有的向量化范式重写后 **7309 µs → 592 µs，1200 GB/s，12.3×，逐 bit 一致**。
+   该 kernel 只在有缓存前缀时调用，因此是缓存路径的修复。
+2. **`LIGHTOP_MQA_LOGITS_BETA_FP8`** —— lightop 中专为 gfx938 写的新版 fp8 indexer，纯环境变量。
+
+**"缓存命中反而变慢"的根因**：KV 以 fp8 存储而 `flashmla_sparse` 后端要 bf16，每次读缓存都要把
+整个前缀反量化一遍；加上 indexer 本身是 O(上下文长度)。两项合计使每 token 效率下降 31%。
+修复后退化从 −34% 收窄到 −13%。
+
+**未达成**：整体 prefill 的 +20% 目标。无缓存场景实测上限 +8.4%，剩余大项 `sparse_attn_fwd`
+(24.2%)、DeepEP(20.9%)、MoE GEMM(13.7%)均已在厂商优化路径上或属通信开销。唯一剩下的
+空间是 `FlashMLA-das` 中未被优化的 `IS_TOPK_2048=true` 分支，属独立 kernel 工程。
+
+### 3.3 PD 分离（1P dcu4 + 1D dcu5，10 月）
 
 | 对比 | 结果 |
 |---|---|
