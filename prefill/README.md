@@ -72,9 +72,14 @@ BW1100。零代码改动。在 2.1 之上再 **+18.8%**(90% 命中)。
 ## 3. 用法
 
 ```bash
-# 安装 kernel 补丁(容器内,不能有服务在跑)
+# 安装(容器内,不能有服务在跑)。仓库根目录的 install.sh 是两轮合一的入口:
+bash install.sh --prefill-only      # 只装这一轮
+bash install.sh                     # 连 10 月的 decode 那轮一起装
+bash uninstall.sh --prefill-only    # 只退这一轮
+
+# 也可以直接调用本轮的补丁脚本
 python3 prefill/patches/patch_fast_dequant.py
-python3 prefill/patches/patch_fast_dequant.py --revert   # 还原
+python3 prefill/patches/patch_fast_dequant.py --revert
 
 # 启动 P 节点;两个开关在 p_opt.sh 里默认开启
 export NODE_IP=<本节点 ib7 IP>
@@ -86,7 +91,8 @@ BETA_FP8=0     bash prefill/p_opt.sh
 ```
 
 补丁是幂等的:首次运行备份一次,之后每次都从备份重打。条件不满足(group_size≠128、
-dim≠656)时自动回退到原实现。
+dim≠656)时自动回退到原实现。`install.sh` 装完会现场构造数据跑一次 `torch.equal`,
+确认重写后的 kernel 与原实现逐 bit 一致,不一致直接报错退出。
 
 `route.sh` **必须在容器内执行**,宿主机没有 `python` 命令。启动顺序是 P → D → router。
 

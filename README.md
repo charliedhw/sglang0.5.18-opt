@@ -7,7 +7,9 @@
 - 单机和 PD 分离两种部署的启动脚本；
 - 测试与分析工具。
 
-工作时间 2026-10-21 ~ 11-11，在 dcu4 / dcu5 两台 8 卡节点上完成。优化镜像 `glm5.3_v1023` 已包含 10 月那批补丁；11 月的 prefill 补丁需另行安装（见 `prefill/`）。
+工作时间 2026-10-21 ~ 11-11，在 dcu4 / dcu5 两台 8 卡节点上完成。两轮优化（10 月 decode、11 月 prefill）
+已整合，**`bash install.sh` 一条命令装全，`bash uninstall.sh` 原样退回**，见第 4 节。优化镜像
+`glm5.3_v1023` 已内置 10 月那批，此时用 `install.sh --prefill-only` 即可。
 
 | 阶段 | 日期 | 内容 | 详细文档 |
 |---|---|---|---|
@@ -21,7 +23,8 @@
 
 | 目录 | 内容 |
 |---|---|
-| `patches/` | 安装与回滚脚本：`apply_all.sh`、`verify_all.sh`、`restore_all.sh`<br>`FILES`：被修改的 17 个 sglang 文件<br>13 个 `patch_*.py`<br>`round1/`：第一轮的 2 个完整文件，以及镜像原始文件的 md5 |
+| `install.sh` / `uninstall.sh` | **两轮合一的安装 / 回退入口**，详见第 4 节 |
+| `patches/` | 第一、二轮（decode）的安装与回滚脚本：`apply_all.sh`、`verify_all.sh`、`restore_all.sh`<br>`FILES`：被修改的 17 个 sglang 文件<br>13 个 `patch_*.py`<br>`round1/`：第一轮的 2 个完整文件，以及镜像原始文件的 md5 |
 | `diffs/` | 每个被修改文件相对镜像原始文件的统一 diff，分 `round1/`、`round2/`，路径相对 `sglang/srt/` |
 | `hcu_ops/` | 新增算子包<br>源码：`csrc/*.cu`、`bind.cpp`、`setup.py`、`build_inc.sh`<br>Python 包：`hcu_ops/__init__.py`、`skinny_cfg.json`。不含预编译 `_C.so`，需在 gfx938 + DTK 环境下编译<br>`tests/`：逐 bit 单测与计时；`tune/`：skinny GEMM / bmm 调优脚本 |
 | `start/` | 单机 DP8 启动脚本 `sglang_start_glm53_opt.sh`，DeepEP normal 配置 `deepep_cfg40.json` |
@@ -144,21 +147,68 @@ PD 分离阶段只修改了启动参数，没有新增代码补丁。
 
 需要注意的点：16K c64 TTFT +79%，尚未 A/B 确认原因。详见 PD 报告 3.4 节和第 8 节。
 
-## 4. 使用
+## 4. 安装与回退
 
-以下命令均在容器内执行，执行时不能有 sglang 服务在运行。镜像为 SGLang 0.5.18 dtk 版。
+两轮优化已整合成一对脚本。**均需在容器内执行，且不能有 sglang 服务在运行**（补丁会改写已被
+导入的文件，脚本会主动检查并拒绝）。镜像为 SGLang 0.5.18 dtk 版。
 
 ```bash
-bash patches/apply_all.sh            # 编译 hcu_ops（无 _C.so 时自动编译）+ 安装 + 第一轮 + 第二轮补丁链（可重复执行）
-bash patches/apply_all.sh --build    # 强制从源码重新编译 hcu_ops
-bash patches/verify_all.sh           # 核对补丁链，应输出 "verify fail=0"
-bash patches/restore_all.sh          # 回到第一轮代码；ROUND1=1 时回到镜像原始代码
+bash install.sh                   # 两轮全装
+bash install.sh --decode-only     # 只装 10 月那批（hcu_ops + 15 个 sglang 补丁）
+bash install.sh --prefill-only    # 只装 11 月那批（dequant kernel）
+bash install.sh --build           # 强制从源码重新编译 hcu_ops
 
-bash start/sglang_start_glm53_opt.sh                 # 单机 DP8
-SGLANG_HCU_MQA_LOGITS=0 bash start/sglang_start_glm53_opt.sh   # 临时关闭某一项
+bash uninstall.sh                 # 两轮全退，回到第一轮状态
+ROUND1=1 bash uninstall.sh        # 连第一轮也退，回到镜像原始状态
+bash uninstall.sh --prefill-only  # 只退 11 月那批
 ```
 
-PD 分离按 P → D → router 的顺序启动，见 PD 报告第 2 节。`p_opt.sh` / `d_opt.sh` 启动前需要 `export NODE_IP=<本节点 ib7 IP>`（用于 `--dist-init-addr`）。
+脚本特性：
+
+- **幂等**。每个补丁首次运行时备份一次，之后每次都从备份重打，可反复执行。
+- **装完自检**。decode 轮跑 `verify_all.sh`（应输出 `verify fail=0`）；prefill 轮现场构造数据
+  跑一次 `torch.equal`，确认重写的 kernel 与原实现**逐 bit 一致**，不一致直接报错退出。
+- **不删除任何东西**。回退时当前文件另存为 `*.pre_restore_<时间>`，所有备份保留，可以再装回去。
+- 已实测验证：装 → 退 → 重装，回退后文件与原始备份**逐字节相同**，重装后仍逐 bit 一致。
+
+### 4.1 启动
+
+```bash
+bash start/sglang_start_glm53_opt.sh                           # 单机 DP8
+SGLANG_HCU_MQA_LOGITS=0 bash start/sglang_start_glm53_opt.sh   # 临时关闭某一项
+
+export NODE_IP=<本节点 ib7 IP>
+bash prefill/p_opt.sh                                          # PD 的 P 节点（CP8）
+FAST_DEQUANT=0 bash prefill/p_opt.sh                           # 临时关掉 dequant 优化
+BETA_FP8=0     bash prefill/p_opt.sh                           # 临时关掉 indexer 优化
+```
+
+PD 分离按 **P → D → router** 的顺序启动，见 PD 报告第 2 节。`route.sh` **必须在容器内跑**，宿主机
+没有 `python` 命令。注意 `p_up.sh` 这类重启脚本的清理步骤会连带杀掉 router，重启 P 后需要重新
+拉起 router。
+
+### 4.2 开关总览
+
+| 轮次 | 开关 | 说明 |
+|---|---|---|
+| decode（10 月） | `SGLANG_HCU_*` | 完整开关表见 `docs/GLM5.3_DCU_优化报告_20261023.md` 第 4 节。**`SGLANG_HCU_SKINNY_DRAFT_VP` 在 `--enable-dp-attention` 下会导致 NCCL 挂死，必须保持 0** |
+| prefill（11 月） | `SGLANG_DSA_FAST_DEQUANT_PAGED` | 需先 `install.sh` 装补丁；`FAST_DEQUANT=0` 可单次关闭 |
+| prefill（11 月） | `LIGHTOP_MQA_LOGITS_BETA_FP8` | 纯环境变量，无需安装；`BETA_FP8=0` 可单次关闭 |
+
+### 4.3 分轮内部脚本
+
+`install.sh` / `uninstall.sh` 只是把下面这些串起来，需要单独操作某一轮时可以直接调用：
+
+```bash
+bash patches/apply_all.sh            # decode 轮：编译 hcu_ops（无 _C.so 时自动编译）+ 第一轮 + 第二轮补丁链
+bash patches/verify_all.sh           # decode 轮核对，应输出 "verify fail=0"
+bash patches/restore_all.sh          # decode 轮回退；ROUND1=1 时回到镜像原始代码
+
+python3 prefill/patches/patch_fast_dequant.py            # prefill 轮安装
+python3 prefill/patches/patch_fast_dequant.py --revert   # prefill 轮回退
+```
+
+`p_opt.sh` / `d_opt.sh` 启动前都需要 `export NODE_IP=<本节点 ib7 IP>`（用于 `--dist-init-addr`）。
 
 ## 5. 未做 / 后续方向
 

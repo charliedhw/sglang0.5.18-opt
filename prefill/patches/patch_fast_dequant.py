@@ -22,9 +22,13 @@ import os
 import py_compile
 import shutil
 import sys
+import sysconfig
 
-SRC = ("/usr/local/lib/python3.10/dist-packages/sglang/kernels/ops/attention/"
-       "dsa/dequant_k_cache.py")
+# Derive the path the same way patches/apply_all.sh does, so this works in any container layout.
+SRC = os.path.join(
+    sysconfig.get_paths()["purelib"],
+    "sglang/kernels/ops/attention/dsa/dequant_k_cache.py",
+)
 BAK = SRC + ".bak_fastdequant"
 
 ANCHOR = "def dequantize_k_cache_paged(\n"
